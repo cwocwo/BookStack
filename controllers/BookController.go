@@ -170,7 +170,9 @@ func (this *BookController) Setting() {
 	}
 
 	if book.PrivateToken != "" {
-		book.PrivateToken = this.BaseUrl() + beego.URLFor("DocumentController.Index", ":key", book.Identify, "token", book.PrivateToken)
+		//book.PrivateToken = this.BaseUrl() + beego.URLFor("DocumentController.Index", ":key", book.Identify, "token", book.PrivateToken)
+		tipsFmt := "访问链接：%v  访问密码：%v"
+		book.PrivateToken = fmt.Sprintf(tipsFmt, this.BaseUrl()+beego.URLFor("DocumentController.Index", ":key", book.Identify), book.PrivateToken)
 	}
 
 	//查询当前书籍的分类id
@@ -231,6 +233,8 @@ func (this *BookController) SaveBook() {
 	book.Author = this.GetString("author")
 	book.AuthorURL = this.GetString("author_url")
 	book.Lang = this.GetString("lang")
+	book.AdTitle = this.GetString("ad_title")
+	book.AdLink = this.GetString("ad_link")
 
 	if err := book.Update(); err != nil {
 		this.JsonResult(6006, "保存失败")
@@ -268,6 +272,9 @@ func (this *BookController) SaveBook() {
 func (this *BookController) PrivatelyOwned() {
 
 	status := this.GetString("status")
+	if this.forbidGeneralRole() && status == "open" {
+		this.JsonResult(6001, "您的角色非作者和管理员，无法将项目设置为公开")
+	}
 	if status != "open" && status != "close" {
 		this.JsonResult(6003, "参数错误")
 	}
@@ -601,7 +608,9 @@ func (this *BookController) Create() {
 
 // CreateToken 创建访问来令牌.
 func (this *BookController) CreateToken() {
-
+	if this.forbidGeneralRole() {
+		this.JsonResult(6001, "您的角色非作者和管理员，无法创建访问令牌")
+	}
 	action := this.GetString("action")
 
 	bookResult, err := this.IsPermission()
@@ -619,8 +628,6 @@ func (this *BookController) CreateToken() {
 		this.JsonResult(6002, err.Error())
 	}
 
-	fmt.Println(bookResult.BookId)
-
 	book := models.NewBook()
 	if _, err := book.Find(bookResult.BookId); err != nil {
 		this.JsonResult(6001, "项目不存在")
@@ -636,7 +643,10 @@ func (this *BookController) CreateToken() {
 			logs.Error("生成阅读令牌失败 => ", err)
 			this.JsonResult(6003, "生成阅读令牌失败")
 		}
-		this.JsonResult(0, "ok", this.BaseUrl()+beego.URLFor("DocumentController.Index", ":key", book.Identify, "token", book.PrivateToken))
+		//book.PrivateToken = this.BaseUrl() + beego.URLFor("DocumentController.Index", ":key", book.Identify, "token", book.PrivateToken)
+		tipsFmt := "访问链接：%v  访问密码：%v"
+		privateToken := fmt.Sprintf(tipsFmt, this.BaseUrl()+beego.URLFor("DocumentController.Index", ":key", book.Identify), book.PrivateToken)
+		this.JsonResult(0, "ok", privateToken)
 	}
 
 	book.PrivateToken = ""
@@ -729,16 +739,19 @@ func (this *BookController) Release() {
 //加锁，防止用户不停地点击生成下载文档造成服务器资源开销.
 func (this *BookController) Generate() {
 	identify := this.GetString(":key")
-	book, err := models.NewBook().FindByIdentify(identify)
 
+	if !models.NewBook().HasProjectAccess(identify, this.Member.MemberId, conf.BookAdmin) {
+		this.JsonResult(1, "您没有操作权限，只有项目创始人和项目管理员才有权限")
+	}
+
+	book, err := models.NewBook().FindByIdentify(identify)
+	if err != nil {
+		beego.Error(err)
+		this.JsonResult(1, "项目不存在")
+	}
 	//书籍正在生成离线文档
 	if isGenerating := utils.BooksGenerate.Exist(book.BookId); isGenerating {
 		this.JsonResult(1, "上一次下载文档生成任务正在后台执行，请您稍后再执行新的下载文档生成操作")
-	}
-
-	if err != nil || book.MemberId != this.Member.MemberId {
-		beego.Error(err)
-		this.JsonResult(1, "项目不存在；或您不是文档创始人，没有文档生成权限")
 	}
 
 	baseUrl := "http://localhost:" + beego.AppConfig.String("httpport")
@@ -801,6 +814,7 @@ func (this *BookController) SaveSort() {
 	this.JsonResult(0, "ok")
 }
 
+// 判断是否具有管理员或管理员以上权限
 func (this *BookController) IsPermission() (*models.BookResult, error) {
 
 	identify := this.GetString("identify")
@@ -866,16 +880,12 @@ func (this *BookController) GitPull() {
 	//2、解压zip到当前目录，然后移除非图片文件
 	//3、将文件夹移动到uploads目录下
 
-	if _, err := this.IsPermission(); err != nil {
-		this.JsonResult(1, err.Error())
-	}
-
-	//普通用户没有权限
-	if this.Member.Role > 1 {
-		this.JsonResult(1, "您没有操作权限")
-	}
-
 	identify := this.GetString("identify")
+
+	if !models.NewBook().HasProjectAccess(identify, this.Member.MemberId, conf.BookEditor) {
+		this.JsonResult(1, "无操作权限")
+	}
+
 	book, _ := models.NewBookResult().FindByIdentify(identify, this.Member.MemberId)
 	if book.BookId == 0 {
 		this.JsonResult(1, "导入失败，只有项目创建人才有权限导入项目")
@@ -900,21 +910,18 @@ func (this *BookController) UploadProject() {
 	//1、接受上传上来的zip文件，并存放到store/temp目录下
 	//2、解压zip到当前目录，然后移除非图片文件
 	//3、将文件夹移动到uploads目录下
-	if _, err := this.IsPermission(); err != nil {
-		this.JsonResult(1, err.Error())
-	}
-
-	//普通用户没法上传项目
-	if this.Member.Role > 1 {
-		this.JsonResult(1, "您没有操作权限")
-	}
 
 	identify := this.GetString("identify")
 
+	if !models.NewBook().HasProjectAccess(identify, this.Member.MemberId, conf.BookEditor) {
+		this.JsonResult(1, "无操作权限")
+	}
+
 	book, _ := models.NewBookResult().FindByIdentify(identify, this.Member.MemberId)
 	if book.BookId == 0 {
-		this.JsonResult(1, "导入失败，只有项目创建人才有权限导入项目")
+		this.JsonResult(1, "项目不存在")
 	}
+
 	f, h, err := this.GetFile("zipfile")
 	if err != nil {
 		this.JsonResult(1, err.Error())
@@ -1162,7 +1169,7 @@ func (this *BookController) replaceToAbs(projectRoot string, identify string) {
 			basePathSlice := strings.Split(basePath, "/")
 			l := len(basePathSlice)
 			b, _ := ioutil.ReadFile(file.Path)
-			output := blackfriday.MarkdownCommon(b)
+			output := blackfriday.Run(b)
 			doc, _ := goquery.NewDocumentFromReader(strings.NewReader(string(output)))
 
 			//图片链接处理

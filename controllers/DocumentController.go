@@ -68,15 +68,14 @@ func isReadable(identify, token string, this *DocumentController) *models.BookRe
 
 	//如果文档是私有的
 	if book.PrivatelyOwned == 1 && !this.Member.IsAdministrator() {
-
 		isOk := false
-
 		if this.Member != nil {
 			_, err := models.NewRelationship().FindForRoleId(book.BookId, this.Member.MemberId)
 			if err == nil {
 				isOk = true
 			}
 		}
+
 		if book.PrivateToken != "" && !isOk {
 			//如果有访问的Token，并且该项目设置了访问Token，并且和用户提供的相匹配，则记录到Session中.
 			//如果用户未提供Token且用户登录了，则判断用户是否参与了该项目.
@@ -84,7 +83,12 @@ func isReadable(identify, token string, this *DocumentController) *models.BookRe
 			if token != "" && strings.EqualFold(token, book.PrivateToken) {
 				this.SetSession(identify, token)
 			} else if token, ok := this.GetSession(identify).(string); !ok || !strings.EqualFold(token, book.PrivateToken) {
-				this.Abort("404")
+				hasErr := ""
+				if this.Ctx.Request.Method == "POST" {
+					hasErr = "true"
+				}
+				this.Redirect(beego.URLFor("DocumentController.Index", ":key", identify)+"?with-password=true&err="+hasErr, 302)
+				this.StopRun()
 			}
 		} else if !isOk {
 			this.Abort("404")
@@ -95,7 +99,7 @@ func isReadable(identify, token string, this *DocumentController) *models.BookRe
 	if this.Member != nil {
 		rel, err := models.NewRelationship().FindByBookIdAndMemberId(bookResult.BookId, this.Member.MemberId)
 		if err == nil {
-			bookResult.MemberId = rel.MemberId
+			bookResult.MemberId = book.MemberId
 			bookResult.RoleId = rel.RoleId
 			bookResult.RelationshipId = rel.RelationshipId
 		}
@@ -117,17 +121,18 @@ func isReadable(identify, token string, this *DocumentController) *models.BookRe
 //文档首页.
 func (this *DocumentController) Index() {
 	identify := this.Ctx.Input.Param(":key")
-	token := this.GetString("token")
 	if identify == "" {
 		this.Abort("404")
 	}
-	tab := strings.ToLower(this.GetString("tab"))
 
-	//如果没有开启匿名访问则跳转到登录
-	if !this.EnableAnonymous && this.Member == nil {
-		this.Redirect(beego.URLFor("AccountController.Login"), 302)
+	token := this.GetString("token")
+	if len(strings.TrimSpace(this.GetString("with-password"))) > 0 {
+		this.indexWithPassword()
 		return
 	}
+
+	tab := strings.ToLower(this.GetString("tab"))
+
 	bookResult := isReadable(identify, token, this)
 	if bookResult.BookId == 0 { //没有阅读权限
 		this.Redirect(beego.URLFor("HomeController.Index"), 302)
@@ -161,6 +166,22 @@ func (this *DocumentController) Index() {
 		"description": bookResult.Description,
 	})
 	this.Data["RelateBooks"] = models.NewRelateBook().Lists(bookResult.BookId)
+}
+
+//文档首页.
+func (this *DocumentController) indexWithPassword() {
+	identify := this.Ctx.Input.Param(":key")
+	if identify == "" {
+		this.Abort("404")
+	}
+	this.TplName = "document/read-with-password.html"
+	this.GetSeoByPage("book_info", map[string]string{
+		"title":       "密码访问",
+		"keywords":    "密码访问",
+		"description": "密码访问",
+	})
+	this.Data["ShowErrTips"] = this.GetString("err") != ""
+	this.Data["Identify"] = identify
 }
 
 //阅读文档.
@@ -208,18 +229,25 @@ func (this *DocumentController) Read() {
 	}
 
 	bodyText := ""
+	authHTTPS := strings.ToLower(models.GetOptionValue("AUTO_HTTPS", "false")) == "true"
 	if doc.Release != "" {
 		query, err := goquery.NewDocumentFromReader(bytes.NewBufferString(doc.Release))
 		if err != nil {
 			beego.Error(err)
 		} else {
 			query.Find("img").Each(func(i int, contentSelection *goquery.Selection) {
-				if src, ok := contentSelection.Attr("src"); ok {
+				src, ok := contentSelection.Attr("src")
+				if ok {
 					if utils.StoreType == utils.StoreOss && !(strings.HasPrefix(src, "https://") || strings.HasPrefix(src, "http://")) {
 						src = this.OssDomain + "/" + strings.TrimLeft(src, "./")
-						contentSelection.SetAttr("src", src)
 					}
 				}
+				if authHTTPS {
+					if srcArr := strings.Split(src, "://"); len(srcArr) > 1 {
+						src = "https://" + strings.Join(srcArr[1:], "://")
+					}
+				}
+				contentSelection.SetAttr("src", src)
 				if alt, _ := contentSelection.Attr("alt"); alt == "" {
 					contentSelection.SetAttr("alt", doc.DocumentName+" - 图"+fmt.Sprint(i+1))
 				}
@@ -1029,13 +1057,14 @@ func (this *DocumentController) Content() {
 	//如果启用了文档历史，则添加历史文档
 	if this.EnableDocumentHistory > 0 {
 		if len(strings.TrimSpace(ds.Markdown)) > 0 { //空内容不存储版本
+			now := time.Now().Unix()
 			history := models.NewDocumentHistory()
 			history.DocumentId = docId
 			history.DocumentName = doc.DocumentName
-			history.ModifyAt = this.Member.MemberId
-			history.MemberId = doc.MemberId
+			history.ModifyAt = int(now)
+			history.MemberId = this.Member.MemberId
 			history.ParentId = doc.ParentId
-			history.Version = time.Now().Unix()
+			history.Version = now
 			history.Action = "modify"
 			history.ActionName = actionName
 			_, err = history.InsertOrUpdate()
@@ -1064,6 +1093,15 @@ func (this *DocumentController) Content() {
 
 //导出文件
 func (this *DocumentController) Export() {
+	if this.Member == nil || this.Member.MemberId == 0 {
+		if tips, ok := this.Option["DOWNLOAD_LIMIT"]; ok {
+			tips = strings.TrimSpace(tips)
+			if len(tips) > 0 {
+				this.JsonResult(1, tips)
+			}
+		}
+	}
+
 	this.TplName = "document/export.html"
 	identify := this.Ctx.Input.Param(":key")
 	ext := strings.ToLower(this.GetString("output"))

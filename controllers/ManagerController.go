@@ -442,6 +442,10 @@ func (this *ManagerController) DeleteBook() {
 // CreateToken 创建访问来令牌.
 func (this *ManagerController) CreateToken() {
 
+	if this.forbidGeneralRole() {
+		this.JsonResult(6001, "您的角色非作者和管理员，无法创建访问令牌")
+	}
+
 	action := this.GetString("action")
 	identify := this.GetString("identify")
 
@@ -490,10 +494,15 @@ func (this *ManagerController) Setting() {
 		this.JsonResult(0, "ok")
 	}
 
-	this.Data["SITE_TITLE"] = this.Option["SITE_NAME"]
 	for _, item := range options {
-		this.Data[item.OptionName] = item
+		if item.OptionName == "APP_PAGE" {
+			this.Data["APP_PAGE"] = item.OptionValue
+			this.Data["M_APP_PAGE"] = item
+		} else {
+			this.Data[item.OptionName] = item
+		}
 	}
+	this.Data["SITE_TITLE"] = this.Option["SITE_NAME"]
 
 	this.Data["IsSetting"] = true
 	this.Data["SeoTitle"] = "配置管理"

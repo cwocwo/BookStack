@@ -63,8 +63,10 @@ type Book struct {
 	Score             int       `orm:"column(score);default(40)" json:"score"` // 文档项目评分，默认40，即4.0星
 	CntScore          int       // 评分人数
 	CntComment        int       // 评论人数
-	Author            string    `orm:"size(50)"`           //原作者，即来源
-	AuthorURL         string    `orm:"column(author_url)"` //原作者链接，即来源链接
+	Author            string    `orm:"size(50)"`            //原作者，即来源
+	AuthorURL         string    `orm:"column(author_url)"`  //原作者链接，即来源链接
+	AdTitle           string    `orm:"default()"`           // 文字广告标题
+	AdLink            string    `orm:"default();size(512)"` // 文字广告链接
 	Lang              string    `orm:"size(10);index;default(zh)"`
 }
 
@@ -83,6 +85,26 @@ func (m *Book) TableNameWithPrefix() string {
 
 func NewBook() *Book {
 	return &Book{}
+}
+
+// minRole 最小的角色权限
+//conf.BookFounder
+//conf.BookAdmin
+//conf.BookEditor
+//conf.BookObserver
+func (m *Book) HasProjectAccess(identify string, memberId int, minRole int) bool {
+	book := NewBook()
+	rel := NewRelationship()
+	o := orm.NewOrm()
+	o.QueryTable(book).Filter("identify", identify).One(book, "book_id")
+	if book.BookId <= 0 {
+		return false
+	}
+	o.QueryTable(rel).Filter("book_id", book.BookId).Filter("member_id", memberId).One(rel)
+	if rel.RelationshipId <= 0 {
+		return false
+	}
+	return rel.RoleId <= minRole
 }
 
 func (m *Book) Insert() (err error) {
@@ -189,7 +211,7 @@ func (m *Book) FindToPager(pageIndex, pageSize, memberId int, PrivatelyOwned ...
 
 	offset := (pageIndex - 1) * pageSize
 	sql2 := "SELECT book.*,rel.member_id,rel.role_id,m.account as create_name FROM " + m.TableNameWithPrefix() + " AS book" +
-		" LEFT JOIN " + relationship.TableNameWithPrefix() + " AS rel ON book.book_id=rel.book_id AND rel.member_id = ? AND rel.role_id=0" +
+		" LEFT JOIN " + relationship.TableNameWithPrefix() + " AS rel ON book.book_id=rel.book_id AND rel.member_id = ? " +
 		" LEFT JOIN " + NewMember().TableNameWithPrefix() + " AS m ON rel.member_id=m.member_id " +
 		" WHERE rel.relationship_id > 0 %v ORDER BY book.book_id DESC LIMIT " + fmt.Sprintf("%d,%d", offset, pageSize)
 
@@ -216,13 +238,13 @@ func (m *Book) FindToPager(pageIndex, pageSize, memberId int, PrivatelyOwned ...
 				books[index].LastModifyText = text.Account + " 于 " + text.ModifyTime.Format("2006-01-02 15:04:05")
 			}
 
-			if book.RoleId == 0 {
+			if book.RoleId == conf.BookFounder {
 				book.RoleName = "创始人"
-			} else if book.RoleId == 1 {
+			} else if book.RoleId == conf.BookAdmin {
 				book.RoleName = "管理员"
-			} else if book.RoleId == 2 {
+			} else if book.RoleId == conf.BookEditor {
 				book.RoleName = "编辑者"
-			} else if book.RoleId == 3 {
+			} else if book.RoleId == conf.BookObserver {
 				book.RoleName = "观察者"
 			}
 		}
@@ -542,6 +564,8 @@ func (book *Book) ToBookResult() (m *BookResult) {
 	m.CntComment = book.CntComment
 	m.Author = book.Author
 	m.AuthorURL = book.AuthorURL
+	m.AdTitle = book.AdTitle
+	m.AdLink = book.AdLink
 	m.Lang = book.Lang
 
 	if book.Theme == "" {
