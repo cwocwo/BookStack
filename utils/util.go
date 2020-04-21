@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/mssola/user_agent"
+
 	"github.com/astaxie/beego/context"
 
 	"github.com/disintegration/imaging"
@@ -64,6 +66,8 @@ var (
 	BasePath, _ = filepath.Abs(filepath.Dir(os.Args[0]))
 	StoreType   = beego.AppConfig.String("store_type") //存储类型
 	langs       sync.Map
+	httpTimeout = time.Duration(beego.AppConfig.DefaultInt("http_timeout", 30)) * time.Second
+	transfer    = strings.TrimRight(strings.TrimSpace(beego.AppConfig.String("http_transfer")), "/") + "/"
 )
 
 func init() {
@@ -153,24 +157,99 @@ func SendMail(conf *conf.SmtpConf, subject, email string, body string) error {
 func RenderDocumentById(id int) {
 	//使用chromium-browser
 	//	chromium-browser --headless --disable-gpu --screenshot --no-sandbox --window-size=320,480 http://www.bookstack.cn
-	link := "http://localhost:" + beego.AppConfig.DefaultString("httpport", "8080") + "/local-render?id=" + strconv.Itoa(id)
+	link := "http://localhost:" + beego.AppConfig.DefaultString("httpport", "8181") + "/local-render?id=" + strconv.Itoa(id)
 	name := beego.AppConfig.DefaultString("chrome", "chromium-browser")
 	args := []string{"--headless", "--disable-gpu", "--screenshot", "--no-sandbox", "--window-size=320,480", link}
-	if ok, _ := beego.AppConfig.Bool("puppeteer"); ok {
+	if ok := beego.AppConfig.DefaultBool("puppeteer", false); ok {
 		name = "node"
 		args = []string{"crawl.js", "--url", link}
 	}
 	cmd := exec.Command(name, args...)
 	beego.Info("render document by document_id:", cmd.Args)
 	// 超过10秒，杀掉进程，避免长期占用
-	time.AfterFunc(30*time.Second, func() {
-		if cmd.Process.Pid != 0 {
+	time.AfterFunc(httpTimeout, func() {
+		if cmd.Process != nil && cmd.Process.Pid != 0 {
 			cmd.Process.Kill()
 		}
 	})
 	if err := cmd.Run(); err != nil {
 		beego.Error(err)
 	}
+}
+
+const screenshotCoverJS = `'use strict';
+// 说明： 这段js是用来进行书籍封面截屏的，请勿随便删除或改动
+const puppeteer = require('puppeteer');
+const fs = require("fs");
+
+let args = process.argv.splice(2);
+let l=args.length;
+let url, identify,folder;
+
+for(let i=0;i<l;i++){
+    switch (args[i]){
+        case "--url":
+            url = args[i+1];
+            if (url==undefined){
+                url = "";
+            }
+            break;
+        case '--identify':
+            identify = args[i+1];
+            break;
+    }
+    i++;
+}
+
+async function screenshot() {
+    const browser = await puppeteer.launch({args: ['--no-sandbox', '--disable-setuid-sandbox'], headless: true, ignoreHTTPSErrors: true});
+    const page = await browser.newPage();
+    page.setViewport({width: 800, height: 1068}); // A4 宽高
+    folder="cache/books/"+identify+"/"
+    page.setExtraHTTPHeaders({
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,co;q=0.7,fr;q=0.6,zh-HK;q=0.5,zh-TW;q=0.4",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3766.2 Safari/537.36"
+    });
+
+    await page.goto(url, {"waitUntil" :  ['networkidle2', 'domcontentloaded'], "timeout":5000});
+    await page.screenshot({path: folder+'cover.png'});
+    await browser.close();
+}
+if (url && identify) screenshot();`
+
+// 生成
+func RenderCoverByBookIdentify(identify string) (err error) {
+	var args []string
+	shotJS := "cover.js"
+	if _, err = os.Stat(shotJS); err != nil {
+		err = ioutil.WriteFile(shotJS, []byte(screenshotCoverJS), os.ModePerm)
+	}
+	if err != nil {
+		return
+	}
+
+	//使用chromium-browser
+	//	chromium-browser --headless --disable-gpu --screenshot --no-sandbox --window-size=320,480 http://www.bookstack.cn
+	link := "http://localhost:" + beego.AppConfig.DefaultString("httpport", "8181") + "/local-render-cover?id=" + identify
+	name := "node"
+	if ok := beego.AppConfig.DefaultBool("puppeteer", false); ok {
+		args = []string{shotJS, "--identify", identify, "--url", link}
+	} else {
+		err = errors.New("请安装并启用puppeteer")
+		return
+	}
+	cmd := exec.Command(name, args...)
+	beego.Info("render cover by book id:", cmd.Args)
+	// 超过30秒，杀掉进程，避免长期占用
+	time.AfterFunc(httpTimeout, func() {
+		if cmd.Process != nil && cmd.Process.Pid != 0 {
+			cmd.Process.Kill()
+		}
+	})
+	if err = cmd.Run(); err != nil {
+		beego.Error(err)
+	}
+	return
 }
 
 //使用chrome采集网页HTML
@@ -199,12 +278,12 @@ func CrawlByChrome(urlStr string, bookIdentify string) (cont string, err error) 
 		args = []string{"--headless", "--disable-gpu", "--dump-dom", "--no-sandbox", urlStr}
 	}
 	cmd := exec.Command(name, args...)
-	expire := 180
+	expire := 2 * httpTimeout
 	if isScreenshot {
-		expire = 300
+		expire = 10 * httpTimeout
 	}
-	time.AfterFunc(time.Duration(expire)*time.Second, func() {
-		if cmd.Process.Pid != 0 {
+	time.AfterFunc(expire, func() {
+		if cmd.Process != nil && cmd.Process.Pid != 0 {
 			cmd.Process.Kill()
 		}
 	})
@@ -329,9 +408,12 @@ func CrawlHtml2Markdown(urlstr string, contType int, force bool, intelligence in
 	if force { //强力模式
 		cont, err = CrawlByChrome(urlstr, project)
 	} else {
-		req := util.BuildRequest("get", urlstr, "", "", "", true, false, headers...)
-		req.SetTimeout(30*time.Second, 30*time.Second)
+		req := util.BuildRequest("get", urlstr, "", "", "", true, false, headers...).SetTimeout(httpTimeout, httpTimeout)
 		cont, err = req.String()
+		if err != nil && transfer != "" {
+			req := util.BuildRequest("get", transfer+urlstr, urlstr, "", "", true, false, headers...).SetTimeout(httpTimeout, httpTimeout)
+			cont, err = req.String()
+		}
 	}
 
 	cont = strings.Replace(cont, "¶", "", -1)
@@ -703,6 +785,7 @@ func DownImage(src string, headers ...map[string]string) (filename string, err e
 	var resp *http.Response
 	var b []byte
 	ext := ".png"
+	src = strings.Replace(src, "/./", "/", -1)
 	file := cryptil.Md5Crypt(src)
 	filename = "cache/" + file
 	srcLower := strings.ToLower(src)
@@ -726,12 +809,18 @@ func DownImage(src string, headers ...map[string]string) (filename string, err e
 		}
 		return
 	}
-
 	//url链接图片
 	resp, err = util.BuildRequest("get", src, src, "", "", true, false, headers...).Response()
 	if err != nil {
-		return
+		if transfer == "" {
+			return
+		}
+		resp, err = util.BuildRequest("get", transfer+src, src, "", "", true, false, headers...).Response()
+		if err != nil {
+			return
+		}
 	}
+
 	defer resp.Body.Close()
 	if tmp := strings.TrimPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "image/"); tmp != "" {
 		if strings.HasPrefix(strings.ToLower(tmp), "svg") {
@@ -750,13 +839,17 @@ func DownImage(src string, headers ...map[string]string) (filename string, err e
 	return
 }
 
-// 截取md5前8个字符
+// 截取md5前16个字符
 func MD5Sub16(str string) string {
-	return cryptil.Md5Crypt(str)[0:16]
+	return cryptil.Md5Crypt(strings.ToLower(str))[0:16]
 }
 
 func JoinURL(rawURL string, urlPath string) string {
 	rawURL = strings.TrimSpace(rawURL)
+
+	if strings.HasPrefix(urlPath, "#") {
+		return urlPath
+	}
 
 	lowerURLPath := strings.ToLower(urlPath)
 	if strings.HasPrefix(lowerURLPath, "//") {
@@ -881,4 +974,22 @@ func GetIP(ctx *context.Context, field string) (ip string) {
 		return slice[0]
 	}
 	return
+}
+
+func IsMobile(userAgent string) bool {
+	return user_agent.New(userAgent).Mobile()
+}
+
+func FormatReadingTime(seconds int, withoutTag ...bool) string {
+	strFmt := "<span>%v</span> <small>小时</small> <span>%v</span> <small>分钟</small>"
+	if len(withoutTag) > 0 && withoutTag[0] {
+		strFmt = "%v 小时 %v 分钟"
+	}
+	hour := int(seconds / 3600)
+	second := int(seconds % 3600 / 60)
+	secondStr := strconv.Itoa(second)
+	if second < 10 {
+		secondStr = "0" + secondStr
+	}
+	return fmt.Sprintf(strFmt, hour, secondStr)
 }

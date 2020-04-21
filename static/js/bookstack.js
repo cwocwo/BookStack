@@ -55,6 +55,17 @@ function load_doc(url,wd,without_history) {
             active_readed_menu(url);
             NProgress.done();
             pre_and_next_link();
+            //重新生成脑图
+ 	      $('.mindmap svg').detach();
+			try {
+			$('.mindmap').each(function() {
+				drawMindMap(this);
+			});				
+
+			} catch (e) {
+				console.log(e);
+
+			}           
             if(wd) {
                 var wds = wd.split(","),l=wds.length;
                 for (var i = 0; i < l; i++) {
@@ -96,6 +107,7 @@ function active_readed_menu(url){
         href=$(this).attr("href");
         if (href==url) {
             $(this).addClass("jstree-clicked");
+            $(this).parents().removeClass("collapse-hide")
             $(this).parent().addClass("readed");
         }else{
             $(this).removeClass("jstree-clicked");
@@ -132,6 +144,24 @@ $(function () {
     $(".view-backtop").on("click", function () {
         $('.manual-right').animate({ scrollTop: '0px' }, 200);
     });
+
+    $(".markdown-body").on("click", "img",function () {
+        var src = $(this).attr("src")
+        var bv = $(".bookstack-viewer")
+        var img = bv.find("img")
+        console.log(src)
+        if(img.length>0){
+            img.attr("src", src)
+        }else {
+            bv.append('<img src="'+src+'"/>')
+        }
+        bv.fadeIn();
+    });
+
+    $(".bookstack-viewer").click(function () {
+        $(this).fadeOut()
+    });
+
     $(".manual-right").scroll(function () {
         var top = $(".manual-right").scrollTop();
         if(top > 100){
@@ -416,7 +446,6 @@ $(function () {
     });
 
     $('.article-menu').animate({scrollTop:$('.article-menu a.jstree-clicked').offset().top-180}, 300);
-
     window.onpopstate=function(e){
         if (location.href.indexOf("#")<0) {
             load_doc(location.pathname,"",true);

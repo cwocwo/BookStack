@@ -3,8 +3,11 @@ package controllers
 import (
 	"encoding/json"
 	"html/template"
+	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/araddon/dateparse"
 
 	"path/filepath"
 	"strconv"
@@ -85,6 +88,45 @@ func (this *ManagerController) Users() {
 	}
 	this.Data["Role"] = role
 	this.Data["Wd"] = wd
+}
+
+// 标签管理.
+func (this *ManagerController) Tags() {
+	this.TplName = "manager/tags.html"
+	this.Data["IsTag"] = true
+	size := 150
+	wd := this.GetString("wd")
+	pageIndex, _ := this.GetInt("page", 1)
+	tags, totalCount, err := models.NewLabel().FindToPager(pageIndex, size, wd)
+	if err != nil {
+		this.Data["ErrorMessage"] = err.Error()
+		return
+	}
+	if totalCount > 0 {
+		this.Data["PageHtml"] = utils.NewPaginations(conf.RollPage, int(totalCount), size, pageIndex, beego.URLFor("ManagerController.Tags"), "")
+	} else {
+		this.Data["PageHtml"] = ""
+	}
+	this.Data["Total"] = totalCount
+	this.Data["Tags"] = tags
+	this.Data["Wd"] = wd
+}
+
+func (this *ManagerController) AddTags() {
+	tags := this.GetString("tags")
+	if tags != "" {
+		tags = strings.Join(strings.Split(tags, "\n"), ",")
+		models.NewLabel().InsertOrUpdateMulti(tags)
+	}
+	this.JsonResult(0, "新增标签成功")
+}
+
+func (this *ManagerController) DelTags() {
+	id, _ := this.GetInt("id")
+	if id > 0 {
+		orm.NewOrm().QueryTable(models.NewLabel()).Filter("label_id", id).Delete()
+	}
+	this.JsonResult(0, "标签删除成功")
 }
 
 // 添加用户.
@@ -490,7 +532,8 @@ func (this *ManagerController) Setting() {
 		if err := models.NewElasticSearchClient().Init(); err != nil {
 			this.JsonResult(1, err.Error())
 		}
-
+		models.NewSign().UpdateSignRule()
+		models.NewReadRecord().UpdateReadingRule()
 		this.JsonResult(0, "ok")
 	}
 
@@ -749,6 +792,72 @@ func (this *ManagerController) Seo() {
 	this.Data["Lists"] = seos
 	this.Data["IsManagerSeo"] = true
 	this.TplName = "manager/seo.html"
+}
+
+func (this *ManagerController) UpdateAds() {
+	id, _ := this.GetInt("id")
+	field := this.GetString("field")
+	value := this.GetString("value")
+	if field == "" {
+		this.JsonResult(1, "字段不能为空")
+	}
+	_, err := orm.NewOrm().QueryTable(models.NewAdsCont()).Filter("id", id).Update(orm.Params{field: value})
+	if err != nil {
+		this.JsonResult(1, err.Error())
+	}
+	go models.UpdateAdsCache()
+	this.JsonResult(0, "操作成功")
+}
+
+func (this *ManagerController) DelAds() {
+	id, _ := this.GetInt("id")
+	_, err := orm.NewOrm().QueryTable(models.NewAdsCont()).Filter("id", id).Delete()
+	if err != nil {
+		this.JsonResult(1, err.Error())
+	}
+	go models.UpdateAdsCache()
+	this.JsonResult(0, "删除成功")
+}
+
+//广告管理
+func (this *ManagerController) Ads() {
+	if this.Ctx.Request.Method == http.MethodPost {
+		pid, _ := this.GetInt("pid")
+		if pid <= 0 {
+			this.JsonResult(1, "请选择广告位")
+		}
+		ads := &models.AdsCont{
+			Title:  this.GetString("title"),
+			Code:   this.GetString("code"),
+			Status: true,
+			Pid:    pid,
+		}
+		start, err := dateparse.ParseAny(this.GetString("start"))
+		if err != nil {
+			start = time.Now()
+		}
+		end, err := dateparse.ParseAny(this.GetString("end"))
+		if err != nil {
+			end = time.Now().Add(24 * time.Hour * 730)
+		}
+		ads.Start = int(start.Unix())
+		ads.End = int(end.Unix())
+		_, err = orm.NewOrm().Insert(ads)
+		if err != nil {
+			this.JsonResult(1, err.Error())
+		}
+		go models.UpdateAdsCache()
+		this.JsonResult(0, "新增广告成功")
+	} else {
+		layout := "2006-01-02"
+		this.Data["Mobile"] = this.GetString("mobile", "0")
+		this.Data["Positions"] = models.NewAdsCont().GetPositions()
+		this.Data["Lists"] = models.NewAdsCont().Lists(this.GetString("mobile", "0") == "1")
+		this.Data["IsAds"] = true
+		this.Data["Now"] = time.Now().Format(layout)
+		this.Data["Next"] = time.Now().Add(time.Hour * 24 * 730).Format(layout)
+		this.TplName = "manager/ads.html"
+	}
 }
 
 //更行书籍项目的排序

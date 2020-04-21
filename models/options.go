@@ -3,7 +3,11 @@ package models
 import (
 	"github.com/TruthHun/BookStack/conf"
 	"github.com/astaxie/beego/orm"
+	"strings"
+	"sync"
 )
+
+var optionCache sync.Map // map[int || string]*Option
 
 // Option struct .
 type Option struct {
@@ -12,6 +16,14 @@ type Option struct {
 	OptionName  string `orm:"column(option_name);unique;size(80)" json:"option_name"`
 	OptionValue string `orm:"column(option_value);type(text);null" json:"option_value"`
 	Remark      string `orm:"column(remark);type(text);null" json:"remark"`
+}
+
+func initOptionCache() {
+	opts, _ := NewOption().All()
+	for _, opt := range opts {
+		optionCache.Store(opt.OptionName, opt)
+		optionCache.Store(opt.OptionId, opt)
+	}
 }
 
 // TableName 获取对应数据库表名.
@@ -33,10 +45,14 @@ func NewOption() *Option {
 }
 
 func (p *Option) Find(id int) (*Option, error) {
+
+	if val, ok := optionCache.Load(id); ok {
+		p = val.(*Option)
+		return p, nil
+	}
+
 	o := orm.NewOrm()
-
 	p.OptionId = id
-
 	if err := o.Read(p); err != nil {
 		return p, err
 	}
@@ -44,6 +60,12 @@ func (p *Option) Find(id int) (*Option, error) {
 }
 
 func (p *Option) FindByKey(key string) (*Option, error) {
+
+	if val, ok := optionCache.Load(key); ok {
+		p = val.(*Option)
+		return p, nil
+	}
+
 	o := orm.NewOrm()
 	if err := o.QueryTable(p).Filter("option_name", key).One(p); err != nil {
 		return p, err
@@ -52,7 +74,6 @@ func (p *Option) FindByKey(key string) (*Option, error) {
 }
 
 func GetOptionValue(key, def string) string {
-
 	if option, err := NewOption().FindByKey(key); err == nil {
 		return option.OptionValue
 	}
@@ -60,7 +81,9 @@ func GetOptionValue(key, def string) string {
 }
 
 func (p *Option) InsertOrUpdate() error {
-
+	defer func() {
+		initOptionCache()
+	}()
 	o := orm.NewOrm()
 
 	var err error
@@ -74,10 +97,9 @@ func (p *Option) InsertOrUpdate() error {
 }
 
 func (p *Option) InsertMulti(option ...Option) error {
-
 	o := orm.NewOrm()
-
 	_, err := o.InsertMulti(len(option), option)
+	initOptionCache()
 	return err
 }
 
@@ -130,6 +152,10 @@ func (m *Option) Init() error {
 			OptionValue: "true",
 			OptionName:  "SPIDER",
 			OptionTitle: "采集器，是否只对管理员开放",
+		}, {
+			OptionValue: "false",
+			OptionName:  "SHOW_CATEGORY_INDEX",
+			OptionTitle: "首页是否显示分类索引",
 		}, {
 			OptionValue: "false",
 			OptionName:  "ELASTICSEARCH_ON",
@@ -206,6 +232,63 @@ func (m *Option) Init() error {
 			OptionValue: "false",
 			OptionName:  "AUTO_HTTPS",
 			OptionTitle: "图片链接HTTP转HTTPS",
+		}, {
+			OptionValue: "0",
+			OptionName:  "APP_VERSION",
+			OptionTitle: "Android APP版本号（数字）",
+		}, {
+			OptionValue: "",
+			OptionName:  "APP_QRCODE",
+			OptionTitle: "是否在用户下载电子书的时候显示APP下载二维码",
+		},
+		{
+			OptionValue: "5",
+			OptionName:  "SIGN_BASIC_REWARD",
+			OptionTitle: "用户每次签到基础奖励阅读时长(秒)",
+		},
+		{
+			OptionValue: "10",
+			OptionName:  "SIGN_APP_REWARD",
+			OptionTitle: "使用APP签到额外奖励阅读时长(秒)",
+		},
+		{
+			OptionValue: "0",
+			OptionName:  "SIGN_CONTINUOUS_REWARD", //
+			OptionTitle: "用户连续签到奖励阅读时长(秒)",
+		}, {
+			OptionValue: "0",
+			OptionName:  "SIGN_CONTINUOUS_MAX_REWARD",
+			OptionTitle: "连续签到奖励阅读时长上限(秒)",
+		},
+		{
+			OptionValue: "0",
+			OptionName:  "READING_MIN_INTERVAL",
+			OptionTitle: "内容最小阅读计时间隔(秒)",
+		},
+		{
+			OptionValue: "600",
+			OptionName:  "READING_MAX_INTERVAL",
+			OptionTitle: "内容最大阅读计时间隔(秒)",
+		},
+		{
+			OptionValue: "1200",
+			OptionName:  "READING_INVALID_INTERVAL",
+			OptionTitle: "内容阅读无效计时间隔(秒)",
+		},
+		{
+			OptionValue: "600",
+			OptionName:  "READING_INTERVAL_MAX_REWARD",
+			OptionTitle: "内容阅读计时间隔最大奖励(秒)",
+		},
+		{
+			OptionValue: "false",
+			OptionName:  "COLLAPSE_HIDE",
+			OptionTitle: "目录是否默认收起",
+		},
+		{
+			OptionValue: "",
+			OptionName:  "FORBIDDEN_REFERER",
+			OptionTitle: "禁止的Referer",
 		},
 	}
 
@@ -216,6 +299,10 @@ func (m *Option) Init() error {
 			}
 		}
 	}
-
+	initOptionCache()
 	return nil
+}
+
+func (m *Option) ForbiddenReferer() []string {
+	return strings.Split(GetOptionValue("FORBIDDEN_REFERER", ""), "\n")
 }

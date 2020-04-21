@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"database/sql"
 	"encoding/gob"
 	"flag"
 	"fmt"
@@ -37,6 +38,17 @@ func RegisterDataBase() {
 
 	port := beego.AppConfig.String("db_port")
 
+	createDB := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s` DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_general_ci", database)
+	conn := fmt.Sprintf("%s:%s@tcp(%s:%s)/", username, password, host, port)
+	db, err := sql.Open("mysql", conn)
+	if err != nil {
+		panic(err)
+	}
+	_, err = db.Exec(createDB)
+	if err != nil {
+		panic(err)
+	}
+
 	dataSource := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&loc=Local", username, password, host, port, database)
 
 	orm.RegisterDataBase("default", "mysql", dataSource)
@@ -44,7 +56,6 @@ func RegisterDataBase() {
 	if beego.AppConfig.String("runmode") == "dev" {
 		orm.Debug = true
 	}
-
 }
 
 // RegisterModel 注册Model
@@ -83,6 +94,11 @@ func RegisterModel() {
 		models.NewWechatCode(),
 		models.NewWechat(),
 		new(models.RegLimit),
+		models.NewAdsPosition(),
+		models.NewAdsCont(),
+		models.NewReadingTime(),
+		models.NewSign(),
+		models.NewBookCounter(),
 	)
 	migrate.RegisterMigration()
 }
@@ -202,6 +218,9 @@ func RegisterFunction() {
 	beego.AddFuncMap("showImg", utils.ShowImg)
 	beego.AddFuncMap("IsFollow", new(models.Fans).Relation)
 	beego.AddFuncMap("isubstr", utils.Substr)
+	beego.AddFuncMap("ads", models.GetAdsCode)
+	beego.AddFuncMap("formatReadingTime", utils.FormatReadingTime)
+	beego.AddFuncMap("add", func(a, b int) int { return a + b })
 }
 
 func ResolveCommand(args []string) {

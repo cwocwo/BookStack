@@ -947,8 +947,8 @@ func (this *BookController) UploadProject() {
 func (this *BookController) unzipToData(bookId int, identify, zipFile, originFilename string) {
 
 	//说明：
-	//OSS中的图片存储规则为projects/$identify/项目中图片原路径
-	//本地存储规则为uploads/projects/$identify/项目中图片原路径
+	//OSS中的图片存储规则为"projects/$identify/项目中图片原路径"
+	//本地存储规则为"uploads/projects/$identify/项目中图片原路径"
 
 	projectRoot := "" //项目根目录
 
@@ -971,89 +971,83 @@ func (this *BookController) unzipToData(bookId int, identify, zipFile, originFil
 	//注意：这里的prefix必须是判断是否是GitHub之前的prefix
 	if err := ziptil.Unzip(zipFile, unzipPath); err != nil {
 		beego.Error("解压失败", zipFile, err.Error())
-	} else {
+		return
+	}
 
-		//读取文件，把图片文档录入oss
-		if files, err := filetil.ScanFiles(unzipPath); err == nil {
-			projectRoot = this.getProjectRoot(files)
-			this.replaceToAbs(projectRoot, identify)
+	//读取文件，把图片文档录入oss
+	if files, err := filetil.ScanFiles(unzipPath); err == nil {
+		projectRoot = this.getProjectRoot(files)
+		this.replaceToAbs(projectRoot, identify)
 
-			ModelStore := new(models.DocumentStore)
-			//文档对应的标识
-			for _, file := range files {
-				if !file.IsDir {
-					ext := strings.ToLower(filepath.Ext(file.Path))
-					if ok, _ := imgMap[ext]; ok { //图片，录入oss
-						switch utils.StoreType {
-						case utils.StoreOss:
-							if err := store.ModelStoreOss.MoveToOss(file.Path, "projects/"+identify+strings.TrimPrefix(file.Path, projectRoot), false, false); err != nil {
-								beego.Error(err)
-							}
-						case utils.StoreLocal:
-							if err := store.ModelStoreLocal.MoveToStore(file.Path, "uploads/projects/"+identify+strings.TrimPrefix(file.Path, projectRoot)); err != nil {
-								beego.Error(err)
-							}
+		ModelStore := new(models.DocumentStore)
+		//文档对应的标识
+		for _, file := range files {
+			if !file.IsDir {
+				ext := strings.ToLower(filepath.Ext(file.Path))
+				if ok, _ := imgMap[ext]; ok { //图片，录入oss
+					switch utils.StoreType {
+					case utils.StoreOss:
+						if err := store.ModelStoreOss.MoveToOss(file.Path, "projects/"+identify+strings.TrimPrefix(file.Path, projectRoot), false, false); err != nil {
+							beego.Error(err)
 						}
-					} else if ext == ".md" || ext == ".markdown" || ext == ".html" { //markdown文档，提取文档内容，录入数据库
-						doc := new(models.Document)
-						var mdcont string
-						var htmlStr string
-						if b, err := ioutil.ReadFile(file.Path); err == nil {
-
-							if ext == ".md" || ext == ".markdown" {
-								mdcont = strings.TrimSpace(string(b))
-
-								htmlStr = mdtil.Md2html(mdcont)
-							} else {
-								htmlStr = string(b)
-								mdcont = html2md.Convert(htmlStr)
-							}
-							if !strings.HasPrefix(mdcont, "[TOC]") {
-								mdcont = "[TOC]\r\n\r\n" + mdcont
-							}
-							doc.DocumentName = utils.ParseTitleFromMdHtml(htmlStr)
-							doc.BookId = bookId
-							//文档标识
-							doc.Identify = strings.Replace(strings.Trim(strings.TrimPrefix(file.Path, projectRoot), "/"), "/", "-", -1)
-							doc.Identify = strings.Replace(doc.Identify, ")", "", -1)
-
-							doc.MemberId = this.Member.MemberId
-							doc.OrderSort = 1
-							if strings.HasSuffix(strings.ToLower(file.Name), "summary.md") {
-								doc.OrderSort = 0
-							}
-							if strings.HasSuffix(strings.ToLower(file.Name), "summary.html") {
-								mdcont += "<bookstack-summary></bookstack-summary>"
-								// 生成带$的文档标识，阅读BaseController.go代码可知，
-								// 要使用summary.md的排序功能，必须在链接中带上符号$
-								mdcont = strings.Replace(mdcont, "](", "]($", -1)
-
-								// 去掉可能存在的url编码的右括号，否则在url译码后会与markdown语法混淆
-								mdcont = strings.Replace(mdcont, "%29", "", -1)
-								mdcont, _ = url.QueryUnescape(mdcont)
-
-								doc.OrderSort = 0
-								doc.Identify = "summary.md"
-							}
-							if docId, err := doc.InsertOrUpdate(); err == nil {
-								if err := ModelStore.InsertOrUpdate(models.DocumentStore{
-									DocumentId: int(docId),
-									Markdown:   mdcont,
-								}, "markdown"); err != nil {
-									beego.Error(err)
-								}
-							} else {
-								beego.Error(err.Error())
+					case utils.StoreLocal:
+						if err := store.ModelStoreLocal.MoveToStore(file.Path, "uploads/projects/"+identify+strings.TrimPrefix(file.Path, projectRoot)); err != nil {
+							beego.Error(err)
+						}
+					}
+				} else if ext == ".md" || ext == ".markdown" || ext == ".html" { //markdown文档，提取文档内容，录入数据库
+					doc := new(models.Document)
+					var mdcont string
+					var htmlStr string
+					if b, err := ioutil.ReadFile(file.Path); err == nil {
+						if ext == ".md" || ext == ".markdown" {
+							mdcont = strings.TrimSpace(string(b))
+							htmlStr = mdtil.Md2html(mdcont)
+						} else {
+							htmlStr = string(b)
+							mdcont = html2md.Convert(htmlStr)
+						}
+						if !strings.HasPrefix(mdcont, "[TOC]") {
+							mdcont = "[TOC]\r\n\r\n" + mdcont
+						}
+						doc.DocumentName = utils.ParseTitleFromMdHtml(htmlStr)
+						doc.BookId = bookId
+						//文档标识
+						doc.Identify = strings.Replace(strings.Trim(strings.TrimPrefix(file.Path, projectRoot), "/"), "/", "-", -1)
+						doc.Identify = strings.Replace(doc.Identify, ")", "", -1)
+						doc.MemberId = this.Member.MemberId
+						doc.OrderSort = 1
+						if strings.HasSuffix(strings.ToLower(file.Name), "summary.md") {
+							doc.OrderSort = 0
+						}
+						if strings.HasSuffix(strings.ToLower(file.Name), "summary.html") {
+							mdcont += "<bookstack-summary></bookstack-summary>"
+							// 生成带$的文档标识，阅读BaseController.go代码可知，
+							// 要使用summary.md的排序功能，必须在链接中带上符号$
+							mdcont = strings.Replace(mdcont, "](", "]($", -1)
+							// 去掉可能存在的url编码的右括号，否则在url译码后会与markdown语法混淆
+							mdcont = strings.Replace(mdcont, "%29", "", -1)
+							mdcont, _ = url.QueryUnescape(mdcont)
+							doc.OrderSort = 0
+							doc.Identify = "summary.md"
+						}
+						if docId, err := doc.InsertOrUpdate(); err == nil {
+							if err := ModelStore.InsertOrUpdate(models.DocumentStore{
+								DocumentId: int(docId),
+								Markdown:   mdcont,
+							}, "markdown"); err != nil {
+								beego.Error(err)
 							}
 						} else {
-							beego.Error("读取文档失败：", file.Path, "错误信息：", err)
+							beego.Error(err.Error())
 						}
-
+					} else {
+						beego.Error("读取文档失败：", file.Path, "错误信息：", err)
 					}
+
 				}
 			}
 		}
-
 	}
 }
 
@@ -1174,20 +1168,36 @@ func (this *BookController) replaceToAbs(projectRoot string, identify string) {
 
 			//图片链接处理
 			doc.Find("img").Each(func(i int, selection *goquery.Selection) {
-				//非http开头的图片地址，即是相对地址
-				if src, ok := selection.Attr("src"); ok && !strings.HasPrefix(strings.ToLower(src), "http") {
-					newSrc := src                                  //默认为旧地址
-					if cnt := strings.Count(src, "../"); cnt < l { //以或者"../"开头的路径
-						newSrc = strings.Join(basePathSlice[0:l-cnt], "/") + "/" + strings.TrimLeft(src, "./")
+				//非http://、// 和 https:// 开头的图片地址，即是相对地址
+				src, ok := selection.Attr("src")
+				lowerSrc := strings.ToLower(src)
+				if ok &&
+					!strings.HasPrefix(lowerSrc, "http://") &&
+					!strings.HasPrefix(lowerSrc, "https://") {
+					newSrc := src //默认为旧地址
+					if strings.HasPrefix(lowerSrc, "//") {
+						newSrc = "https:" + newSrc
+					} else {
+						if cnt := strings.Count(src, "../"); cnt < l { //以或者"../"开头的路径
+							newSrc = strings.Join(basePathSlice[0:l-cnt], "/") + "/" + strings.TrimLeft(src, "./")
+						}
+						newSrc = imgBaseUrl + "/" + strings.TrimLeft(strings.TrimPrefix(strings.TrimLeft(newSrc, "./"), projectRoot), "/")
 					}
-					newSrc = imgBaseUrl + "/" + strings.TrimLeft(strings.TrimPrefix(strings.TrimLeft(newSrc, "./"), projectRoot), "/")
 					mdCont = strings.Replace(mdCont, src, newSrc, -1)
 				}
 			})
 
 			//a标签链接处理。要注意判断有锚点的情况
 			doc.Find("a").Each(func(i int, selection *goquery.Selection) {
-				if href, ok := selection.Attr("href"); ok && !strings.HasPrefix(strings.ToLower(href), "http") && !strings.HasPrefix(href, "#") {
+				href, ok := selection.Attr("href")
+				lowerHref := strings.TrimSpace(strings.ToLower(href))
+				// 链接存在，且不以 // 、 http、https、mailto 开头
+				if ok &&
+					!strings.HasPrefix(lowerHref, "//") &&
+					!strings.HasPrefix(lowerHref, "http://") &&
+					!strings.HasPrefix(lowerHref, "https://") &&
+					!strings.HasPrefix(lowerHref, "mailto:") &&
+					!strings.HasPrefix(lowerHref, "#") {
 					newHref := href //默认
 					if cnt := strings.Count(href, "../"); cnt < l {
 						newHref = strings.Join(basePathSlice[0:l-cnt], "/") + "/" + strings.TrimLeft(href, "./")

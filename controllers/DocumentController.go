@@ -37,6 +37,19 @@ type DocumentController struct {
 	BaseController
 }
 
+func (this *DocumentController) Abort404(bookName, bookLink string) {
+	this.Ctx.ResponseWriter.WriteHeader(404)
+	this.Data["BookName"] = bookName
+	this.Data["BookLink"] = bookLink
+	this.TplName = "errors/404.html"
+	b, err := this.RenderBytes()
+	if err != nil {
+		this.Abort("404")
+	}
+	this.Ctx.ResponseWriter.Write(b)
+	this.StopRun()
+}
+
 // 解析并提取版本控制的commit内容
 func parseGitCommit(str string) (cont, commit string) {
 	var slice []string
@@ -160,8 +173,12 @@ func (this *DocumentController) Index() {
 	//当前默认展示100条评论
 	this.Data["Comments"], _ = new(models.Comments).Comments(1, 100, bookResult.BookId, 1)
 	this.Data["Menu"], _ = new(models.Document).GetMenuTop(bookResult.BookId)
+	title := "《" + bookResult.BookName + "》"
+	if tab == "comment" {
+		title = "点评 - " + title
+	}
 	this.GetSeoByPage("book_info", map[string]string{
-		"title":       "《" + bookResult.BookName + "》",
+		"title":       title,
 		"keywords":    bookResult.Label,
 		"description": bookResult.Description,
 	})
@@ -201,6 +218,8 @@ func (this *DocumentController) Read() {
 	}
 
 	bookResult := isReadable(identify, token, this)
+	bookName := bookResult.BookName
+	bookLink := beego.URLFor("DocumentController.Index", ":key", bookResult.Identify)
 
 	this.TplName = "document/" + bookResult.Theme + "_read.html"
 
@@ -211,7 +230,7 @@ func (this *DocumentController) Read() {
 		doc, err = doc.Find(docId) //文档id
 		if err != nil {
 			beego.Error(err)
-			this.Abort("404")
+			this.Abort404(bookName, bookLink)
 		}
 	} else {
 		//此处的id是字符串，标识文档标识，根据文档标识和文档所属的书的id作为key去查询
@@ -220,12 +239,12 @@ func (this *DocumentController) Read() {
 			if err != orm.ErrNoRows {
 				beego.Error(err, docId, id, bookResult)
 			}
-			this.Abort("404")
+			this.Abort404(bookName, bookLink)
 		}
 	}
 
 	if doc.BookId != bookResult.BookId {
-		this.Abort("404")
+		this.Abort404(bookName, bookLink)
 	}
 
 	bodyText := ""
@@ -305,6 +324,8 @@ func (this *DocumentController) Read() {
 
 	doc.Vcnt = doc.Vcnt + 1
 
+	models.NewBookCounter().Increase(bookResult.BookId, true)
+
 	if this.IsAjax() {
 		var data struct {
 			Id        int    `json:"doc_id"`
@@ -331,29 +352,43 @@ func (this *DocumentController) Read() {
 
 	if err != nil {
 		beego.Error(err)
-		this.Abort("404")
+		this.Abort404(bookName, bookLink)
 	}
 
 	// 查询用户哪些文档阅读了
+	var readMap = make(map[string]bool)
 	if this.Member.MemberId > 0 {
 		modelRecord := new(models.ReadRecord)
 		lists, cnt, _ := modelRecord.List(this.Member.MemberId, bookResult.BookId)
 		if cnt > 0 {
-			var readMap = make(map[string]bool)
 			for _, item := range lists {
 				readMap[strconv.Itoa(item.DocId)] = true
 			}
-			if doc, err := goquery.NewDocumentFromReader(strings.NewReader(tree)); err == nil {
-				doc.Find("li").Each(func(i int, selection *goquery.Selection) {
-					if id, exist := selection.Attr("id"); exist {
-						if _, ok := readMap[id]; ok {
-							selection.AddClass("readed")
-						}
-					}
-				})
-				tree, _ = doc.Find("body").Html()
-			}
 		}
+	}
+
+	this.Data["ToggleMenu"] = false
+	if menuDoc, err := goquery.NewDocumentFromReader(strings.NewReader(tree)); err == nil {
+		menuDoc.Find("li").Each(func(i int, selection *goquery.Selection) {
+			if id, exist := selection.Attr("id"); exist {
+				if _, ok := readMap[id]; ok {
+					selection.AddClass("readed")
+				}
+			}
+		})
+		hide := models.GetOptionValue("COLLAPSE_HIDE", "true") == "true"
+		menuDoc.Find("ul").Each(func(i int, selection *goquery.Selection) {
+			if selection.Parent().Is("li") {
+				selection.Parent().AddClass("collapse-node")
+				selection.Parent().PrependHtml("<span></span>")
+				this.Data["ToggleMenu"] = true
+				if hide {
+					selection.Parent().AddClass("collapse-hide")
+				}
+			}
+		})
+		menuDoc.Find(".jstree-clicked").Parents().RemoveClass("collapse-hide")
+		tree, _ = menuDoc.Find("body").Html()
 	}
 
 	if beego.AppConfig.DefaultBool("showWechatCode", false) && bookResult.PrivatelyOwned == 0 {
@@ -709,7 +744,15 @@ func (this *DocumentController) Upload() {
 			this.JsonResult(6005, "保存文件失败")
 		}
 	}
-	osspath := fmt.Sprintf("projects/%v/%v", identify, fileName+filepath.Ext(attachment.HttpPath))
+
+	//文件和图片分开放在项目文件夹内
+	var osspath = ""
+	if strings.EqualFold(ext, ".jpg") || strings.EqualFold(ext, ".jpeg") || strings.EqualFold(ext, ".png") || strings.EqualFold(ext, ".gif") {
+		osspath = fmt.Sprintf("projects/%v/%v", identify, fileName+filepath.Ext(attachment.HttpPath))
+	} else {
+		osspath = strings.Replace(filepath.Join("projects", identify, "files", fileName+ext), "\\", "/", -1)
+	}
+
 	switch utils.StoreType {
 	case utils.StoreOss:
 		if err := store.ModelStoreOss.MoveToOss("."+attachment.HttpPath, osspath, true, false); err != nil {
@@ -719,10 +762,23 @@ func (this *DocumentController) Upload() {
 		attachment.HttpPath = "/" + osspath
 	case utils.StoreLocal:
 		osspath = "uploads/" + osspath
-		if err := store.ModelStoreLocal.MoveToStore("."+attachment.HttpPath, osspath); err != nil {
-			beego.Error(err.Error())
+		//图片是正确的，先不修改
+		if strings.EqualFold(ext, ".jpg") || strings.EqualFold(ext, ".jpeg") || strings.EqualFold(ext, ".png") || strings.EqualFold(ext, ".gif") {
+			if err := store.ModelStoreLocal.MoveToStore("."+attachment.HttpPath, osspath); err != nil {
+				beego.Error(err.Error())
+			}
+			attachment.HttpPath = "/" + osspath
+			attachment.FilePath = filepath.Join(commands.WorkingDirectory, osspath)
+		} else {
+			if err := store.ModelStoreLocal.MoveToStore(filePath, osspath); err != nil {
+				beego.Error(err.Error())
+			}
+			attachment.FilePath = osspath
 		}
-		attachment.HttpPath = "/" + osspath
+		if err := attachment.Update(); err != nil {
+			beego.Error("SaveToFile => ", err)
+			this.JsonResult(6005, "保存文件失败")
+		}
 	}
 
 	result := map[string]interface{}{
@@ -986,6 +1042,7 @@ func (this *DocumentController) Content() {
 		replaces := []string{"<bookstack-summary></bookstack-summary>", "<bookstack-summary/>"}
 		for _, r := range replaces {
 			markdown = strings.Replace(markdown, r, "", -1)
+			content = strings.Replace(content, r, "", -1)
 		}
 	}
 
@@ -1005,24 +1062,28 @@ func (this *DocumentController) Content() {
 		content, markdown, _ = new(models.Document).BookStackCrawl(content, markdown, bookId, this.Member.MemberId)
 	}
 
-	if strings.Contains(markdown, "<bookstack-auto></bookstack-auto>") || strings.Contains(doc.Markdown, "<bookstack-auto/>") {
+	content = this.replaceLinks(identify, content, isSummary)
+	auto := strings.Contains(markdown, "<bookstack-auto></bookstack-auto>") || strings.Contains(doc.Markdown, "<bookstack-auto/>")
+	if isSummary || auto {
 		//自动生成文档内容
-
 		var imd, icont string
 		newDoc := models.NewDocument()
 		if strings.ToLower(doc.Identify) == "summary.md" {
-			icont, _ = newDoc.CreateDocumentTreeForHtml(doc.BookId, doc.DocumentId)
-			imd = html2md.Convert(icont)
-			imd = strings.Replace(imd, "(/read/"+identify+"/", "($", -1)
+			if auto {
+				icont, _ = newDoc.CreateDocumentTreeForHtml(doc.BookId, doc.DocumentId)
+				imd = html2md.Convert(icont)
+			} else {
+				imd = html2md.Convert(content)
+				markdown = imd
+			}
 		} else {
 			imd, icont = newDoc.BookStackAuto(bookId, docId)
 		}
-
 		markdown = strings.Replace(markdown, "<bookstack-auto></bookstack-auto>", imd, -1)
 		content = strings.Replace(content, "<bookstack-auto></bookstack-auto>", icont, -1)
-		isAuto = true
+		markdown = strings.Replace(markdown, "(/read/"+identify+"/", "($", -1)
+		isAuto = true && !isSummary
 	}
-	content = this.replaceLinks(identify, content, isSummary)
 
 	var ds = models.DocumentStore{}
 	var actionName string
@@ -1117,6 +1178,7 @@ func (this *DocumentController) Export() {
 	book, err := new(models.Book).FindByIdentify(identify)
 	if err != nil {
 		beego.Error(err.Error())
+		this.JsonResult(1, "下载失败，您要下载的文档当前并未生成可下载文档。")
 	}
 	if book.PrivatelyOwned == 1 && this.Member.MemberId != book.MemberId {
 		this.JsonResult(1, "私有文档，只有文档创建人可导出")

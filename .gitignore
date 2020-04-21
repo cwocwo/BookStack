@@ -19,6 +19,8 @@ _cgo_export.*
 
 _testmain.go
 
+test/
+
 *.exe
 *.test
 *.prof
@@ -43,3 +45,4 @@ node_modules
 dist
 output
 virtualroot
+docker

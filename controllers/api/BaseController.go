@@ -92,6 +92,18 @@ type APIDoc struct {
 	Bookmark     bool      `json:"bookmark"`
 }
 
+type UserMoreInfo struct {
+	MemberId              int `json:"uid"`
+	SignedAt              int `json:"signed_at"`               // 签到时间
+	CreatedAt             int `json:"created_at"`              // 注册时间
+	TotalSign             int `json:"total_sign"`              // 总签到天数
+	TotalContinuousSign   int `json:"total_continuous_sign"`   // 总连续签到天数
+	HistoryContinuousSign int `json:"history_continuous_sign"` // 历史连续签到天数
+	TodayReading          int `json:"today_reading"`           // 今日阅读时长
+	MonthReading          int `json:"month_reading"`           // 本月阅读时长
+	TotalReading          int `json:"total_reading"`           // 总阅读时长
+}
+
 type APIDocV2 struct {
 	DocumentId   int         `json:"id"`
 	ParentId     int         `json:"pid"`
@@ -137,6 +149,8 @@ const (
 	messageEmailError              = "邮箱格式不正确"
 	messageRequiredInput           = "请输入必填项"
 	messageNotEqualTwicePassword   = "两次输入密码不一致"
+	messageMustLogin               = "内容暂时不允许游客访问，请先登录"
+	messageForbidRegister          = "网站已经关闭了注册功能，暂时不允许注册"
 	maxPageSize                    = 30
 )
 
@@ -193,6 +207,28 @@ func (this *BaseController) Prepare() {
 		}
 	}
 	this.Token = this.Ctx.Request.Header.Get("Authorization")
+
+	if !models.AllowVisitor && this.isLogin() == 0 { // 不允许游客访问，则除了部分涉及登录的API外，一律提示先登录
+		allowAPIs := map[string]bool{
+			beego.URLFor("CommonController.Login"):         true,
+			beego.URLFor("CommonController.LoginByWechat"): true,
+			//beego.URLFor("CommonController.LoginBindWechat"): true, // 这个接口属于绑定信息的，属于注册接口。
+		}
+		if _, ok := allowAPIs[this.Ctx.Request.URL.Path]; !ok {
+			this.Response(http.StatusBadRequest, messageMustLogin)
+		}
+	}
+
+	if !models.AllowRegister { // 如果不允许注册，则不允许用户访问注册相关的接口，其他接口可以访问
+		denyAPIs := map[string]bool{
+			beego.URLFor("CommonController.LoginBindWechat"): true, // 这个接口属于绑定信息的，属于注册接口。
+			beego.URLFor("CommonController.Register"):        true, // 这个接口属于绑定信息的，属于注册接口。
+		}
+		if _, ok := denyAPIs[this.Ctx.Request.URL.Path]; ok {
+			this.Response(http.StatusBadRequest, messageForbidRegister)
+		}
+	}
+
 }
 
 func (this *BaseController) isLogin() (uid int) {

@@ -3,6 +3,7 @@ package controllers
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"strconv"
 	"unicode/utf8"
 
@@ -30,25 +31,54 @@ type BaseController struct {
 	Member                *models.Member
 	Option                map[string]string
 	EnableAnonymous       bool
+	AllowRegister         bool
 	EnableDocumentHistory int
 	Sitename              string
+	IsMobile              bool
 	OssDomain             string
+	StaticDomain          string
+	NoNeedLoginRouter     bool
 }
+
 type CookieRemember struct {
 	MemberId int
 	Account  string
 	Time     time.Time
 }
 
+func (this *BaseController) refreshReferer() {
+	referer := this.Ctx.Request.Header.Get("referer")
+	if referer != "" {
+		referer, _ = url.QueryUnescape(referer)
+		referer = strings.ToLower(referer)
+		forbid := models.NewOption().ForbiddenReferer()
+		if len(forbid) > 0 {
+			for _, item := range forbid {
+				item = strings.ToLower(strings.TrimSpace(item))
+				if item != "" && strings.Contains(referer, item) && !strings.HasSuffix(referer, strings.ToLower(this.Ctx.Request.RequestURI)) {
+					this.Redirect(this.Ctx.Request.RequestURI, 302)
+					return
+				}
+			}
+		}
+	}
+}
+
 // Prepare 预处理.
 func (this *BaseController) Prepare() {
+	this.refreshReferer()
+
 	this.Data["Version"] = utils.Version
+	this.IsMobile = utils.IsMobile(this.Ctx.Request.UserAgent())
+	this.Data["IsMobile"] = this.IsMobile
 	this.Member = models.NewMember() //初始化
 	this.EnableAnonymous = false
+	this.AllowRegister = true
 	this.EnableDocumentHistory = 0
 	this.OssDomain = strings.TrimRight(beego.AppConfig.String("oss::Domain"), "/ ")
 	this.Data["OssDomain"] = this.OssDomain
-	this.Data["StaticDomain"] = strings.Trim(beego.AppConfig.DefaultString("static_domain", ""), "/")
+	this.StaticDomain = strings.Trim(beego.AppConfig.DefaultString("static_domain", ""), "/")
+	this.Data["StaticDomain"] = this.StaticDomain
 	//从session中获取用户信息
 	if member, ok := this.GetSession(conf.LoginSessionName).(models.Member); ok && member.MemberId > 0 {
 		m, _ := models.NewMember().Find(member.MemberId)
@@ -73,7 +103,10 @@ func (this *BaseController) Prepare() {
 	}
 	this.Data["Member"] = this.Member
 	this.Data["BaseUrl"] = this.BaseUrl()
-
+	this.Data["IsSignedToday"] = false
+	if this.Member.MemberId > 0 {
+		this.Data["IsSignedToday"] = models.NewSign().IsSignToday(this.Member.MemberId)
+	}
 	if options, err := models.NewOption().All(); err == nil {
 		this.Option = make(map[string]string, len(options))
 		for _, item := range options {
@@ -85,6 +118,11 @@ func (this *BaseController) Prepare() {
 			if strings.EqualFold(item.OptionName, "ENABLE_ANONYMOUS") && item.OptionValue == "true" {
 				this.EnableAnonymous = true
 			}
+
+			if strings.EqualFold(item.OptionName, "ENABLED_REGISTER") && item.OptionValue == "false" {
+				this.AllowRegister = false
+			}
+
 			if verNum, _ := strconv.Atoi(item.OptionValue); strings.EqualFold(item.OptionName, "ENABLE_DOCUMENT_HISTORY") && verNum > 0 {
 				this.EnableDocumentHistory = verNum
 			}
@@ -103,7 +141,35 @@ func (this *BaseController) Prepare() {
 	}
 
 	this.Data["SiteName"] = this.Sitename
-	this.Data["Friendlinks"] = new(models.FriendLink).GetList(false)
+
+	if this.Member.MemberId == 0 {
+		if this.EnableAnonymous == false && !this.NoNeedLoginRouter { // 不允许游客访问
+			allowPaths := map[string]bool{
+				beego.URLFor("AccountController.Login"):        true,
+				beego.URLFor("AccountController.Logout"):       true,
+				beego.URLFor("AccountController.FindPassword"): true,
+				beego.URLFor("AccountController.ValidEmail"):   true,
+			}
+			if _, ok := allowPaths[this.Ctx.Request.URL.Path]; !ok {
+				this.Redirect(beego.URLFor("AccountController.Login"), 302)
+				return
+			}
+		}
+
+		if this.AllowRegister == false { // 不允许用户注册
+			denyPaths := map[string]bool{
+				// 第三方登录，如果是新注册的话，需要绑定信息，这里不让绑定信息就是不让注册
+				beego.URLFor("AccountController.Bind"): true,
+				// 禁止邮箱注册
+				beego.URLFor("AccountController.Oauth", ":oauth", "email"): true,
+			}
+			if _, ok := denyPaths[this.Ctx.Request.URL.Path]; ok {
+				this.Redirect("/login", 302)
+				return
+			}
+		}
+	}
+
 }
 
 // SetMember 获取或设置当前登录用户信息,如果 MemberId 小于 0 则标识删除 Session
@@ -245,7 +311,7 @@ func (this *BaseController) loginByMemberId(memberId int) (err error) {
 }
 
 //在markdown头部加上<bookstack></bookstack>或者<bookstack/>，即解析markdown中的ul>li>a链接作为目录
-func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId int) {
+func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId int) string {
 	debug := beego.AppConfig.String("runmod") != "prod"
 	o := orm.NewOrm()
 	qs := o.QueryTable("md_documents").Filter("book_id", bookId)
@@ -266,6 +332,10 @@ func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId i
 		if href, ok := selection.Attr("href"); ok && strings.HasPrefix(href, "$") {
 			href = strings.TrimLeft(strings.Replace(href, "/", "-", -1), "$")
 			if utf8.RuneCountInString(href) <= 100 {
+				if href == "" {
+					href = strings.Replace(selection.Text(), " ", "", -1) + ".md"
+					selection.SetAttr("href", "$"+href)
+				}
 				hrefs[href] = selection.Text()
 				hrefSlice = append(hrefSlice, href)
 			}
@@ -287,15 +357,15 @@ func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId i
 	if len(hrefs) > 0 { //存在未创建的文档，先创建
 		ModelStore := new(models.DocumentStore)
 		for identify, docName := range hrefs {
-			doc := models.Document{
-				BookId:       bookId,
-				Identify:     identify,
-				DocumentName: docName,
-				CreateTime:   time.Now(),
-				ModifyTime:   time.Now(),
-			}
 			// 如果文档标识超过了规定长度（100），则进行忽略
 			if utf8.RuneCountInString(identify) <= 100 {
+				doc := models.Document{
+					BookId:       bookId,
+					Identify:     identify,
+					DocumentName: docName,
+					CreateTime:   time.Now(),
+					ModifyTime:   time.Now(),
+				}
 				if docId, err := doc.InsertOrUpdate(); err == nil {
 					if err = ModelStore.InsertOrUpdate(models.DocumentStore{DocumentId: int(docId), Markdown: "[TOC]\n\r\n\r"}); err != nil {
 						beego.Error(err.Error())
@@ -310,7 +380,7 @@ func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId i
 	_, _ = qs.Update(orm.Params{"order_sort": 100000})
 
 	doc.Find("a").Each(func(i int, selection *goquery.Selection) {
-		docName := selection.Text()
+		docName := strings.TrimSpace(selection.Text())
 		pid := 0
 		if docId, exist := selection.Attr("data-pid"); exist {
 			did, _ := strconv.Atoi(docId)
@@ -322,6 +392,9 @@ func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId i
 				pid, _ = strconv.Atoi(pidstr)
 			}
 			if did > 0 {
+				if docName == "$auto-title" {
+					docName = models.NewDocument().AutoTitle(did, docName)
+				}
 				qs.Filter("document_id", did).Update(orm.Params{
 					"parent_id": pid, "document_name": docName,
 					"order_sort": idx, "modify_time": time.Now(),
@@ -337,7 +410,9 @@ func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId i
 					pid = one.DocumentId
 				}
 			}
-
+			if docName == "$auto-title" {
+				docName = models.NewDocument().AutoTitle(identify, docName)
+			}
 			if _, err := qs.Filter("identify", identify).Update(orm.Params{
 				"parent_id": pid, "document_name": docName,
 				"order_sort": idx, "modify_time": time.Now(),
@@ -348,9 +423,11 @@ func (this *BaseController) sortBySummary(bookIdentify, htmlStr string, bookId i
 		idx++
 	})
 
+	htmlStr, _ = doc.Find("body").Html()
 	if len(hrefs) > 0 { //如果有新创建的文档，则再调用一遍，用于处理排序
-		this.replaceLinks(bookIdentify, htmlStr, true)
+		htmlStr = this.replaceLinks(bookIdentify, htmlStr, true)
 	}
+	return htmlStr
 }
 
 //排序
@@ -408,7 +485,7 @@ func (this *BaseController) replaceLinks(bookIdentify string, docHtml string, is
 				if newHtml, err := gq.Find("body").Html(); err == nil {
 					docHtml = newHtml
 					if len(isSummary) > 0 && isSummary[0] == true { //更新排序
-						this.sortBySummary(bookIdentify, docHtml, book.BookId) //更新排序
+						docHtml = this.sortBySummary(bookIdentify, docHtml, book.BookId) //更新排序
 					}
 				}
 			} else {
@@ -416,7 +493,6 @@ func (this *BaseController) replaceLinks(bookIdentify string, docHtml string, is
 			}
 		}
 	}
-
 	return docHtml
 }
 
@@ -445,7 +521,7 @@ func (this *BaseController) Crawl() {
 //关注或取消关注
 func (this *BaseController) SetFollow() {
 	var cancel bool
-	if this.Member.MemberId == 0 {
+	if this.Member == nil || this.Member.MemberId == 0 {
 		this.JsonResult(1, "请先登录")
 	}
 	uid, _ := this.GetInt(":uid")
@@ -457,6 +533,17 @@ func (this *BaseController) SetFollow() {
 		this.JsonResult(0, "您已经成功取消了关注")
 	}
 	this.JsonResult(0, "您已经成功关注了Ta")
+}
+
+func (this *BaseController) SignToday() {
+	if this.Member == nil || this.Member.MemberId == 0 {
+		this.JsonResult(1, "请先登录")
+	}
+	reward, err := models.NewSign().Sign(this.Member.MemberId, false)
+	if err != nil {
+		this.JsonResult(1, "签到失败："+err.Error())
+	}
+	this.JsonResult(0, fmt.Sprintf("恭喜您，签到成功,奖励阅读时长 %v 秒", reward))
 }
 
 func (this *BaseController) forbidGeneralRole() bool {

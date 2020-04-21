@@ -107,6 +107,13 @@ func (m *Book) HasProjectAccess(identify string, memberId int, minRole int) bool
 	return rel.RoleId <= minRole
 }
 
+func (m *Book) Sorted(limit int, orderField string) (books []Book) {
+	o := orm.NewOrm()
+	fields := []string{"book_id", "book_name", "identify", "cover", "vcnt", "star", "cnt_comment"}
+	o.QueryTable(m).Filter("order_index__gte", 0).Filter("privately_owned", 0).OrderBy("-"+orderField).Limit(limit).All(&books, fields...)
+	return
+}
+
 func (m *Book) Insert() (err error) {
 	o := orm.NewOrm()
 	if _, err = o.Insert(m); err != nil {
@@ -362,7 +369,7 @@ func (m *Book) HomeData(pageIndex, pageSize int, orderType BookOrder, lang strin
 		order = "pin desc,order_index desc"
 	case OrderLatestRecommend: //最新推荐
 		cond = append(cond, "order_index>0")
-		order = "book_id desc"
+		order = "release_time desc"
 	case OrderPopular: //受欢迎
 		order = "pin desc,star desc,vcnt desc"
 	case OrderLatest, OrderNew: //最新发布
@@ -599,9 +606,12 @@ func (m *Book) Replace(bookId int, src, dst string) {
 			ds := new(DocumentStore)
 			o.QueryTable(ds).Filter("document_id", doc.DocumentId).One(ds)
 			if ds.DocumentId > 0 {
-				ds.Markdown = strings.Replace(ds.Markdown, src, dst, -1)
-				ds.Content = strings.Replace(ds.Content, src, dst, -1)
-				o.Update(ds)
+				if count := strings.Count(ds.Markdown, src); count > 0 { // 如果没找到内容，则不更新这篇文章
+					ds.Markdown = strings.Replace(ds.Markdown, src, dst, count)
+					ds.Content = ""
+					ds.UpdatedAt = time.Now()
+					o.Update(ds)
+				}
 			}
 		}
 	}
@@ -655,5 +665,31 @@ func (n *Book) SearchBook(wd string, page, size int) (books []Book, cnt int, err
 		_, err = o.Raw(sql+" limit ? offset ?", wd, wd, wd, size, (page-1)*size).QueryRows(&books)
 	}
 
+	return
+}
+
+// search books with labels
+func (b *Book) SearchBookByLabel(labels []string, limit int, excludeIds []int) (bookIds []int, err error) {
+	bookIds = []int{}
+	if len(labels) == 0 {
+		return
+	}
+
+	rawRegex := strings.Join(labels, "|")
+
+	excludeClause := ""
+	if len(excludeIds) == 1 {
+		excludeClause = fmt.Sprintf("book_id != %d AND", excludeIds[0])
+	} else if len(excludeIds) > 1 {
+		excludeVal := strings.Replace(strings.Trim(fmt.Sprint(excludeIds), "[]"), " ", ",", -1)
+		excludeClause = fmt.Sprintf("book_id NOT IN (%s) AND", excludeVal)
+	}
+
+	sql := fmt.Sprintf("SELECT book_id FROM md_books WHERE %v label REGEXP ? ORDER BY star DESC LIMIT ?", excludeClause)
+	o := orm.NewOrm()
+	_, err = o.Raw(sql, rawRegex, limit).QueryRows(&bookIds)
+	if err != nil {
+		logs.Error("failed to execute sql: %s, err: %s", sql, err.Error())
+	}
 	return
 }

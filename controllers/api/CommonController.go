@@ -190,7 +190,33 @@ func (this *CommonController) login(member models.Member) {
 		this.Response(http.StatusInternalServerError, messageInternalServerError)
 	}
 	user.Avatar = this.completeLink(utils.ShowImg(user.Avatar, "avatar"))
-	this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"user": user})
+	data := map[string]interface{}{"user": user}
+	this.Response(http.StatusOK, messageSuccess, data)
+}
+
+func (this *CommonController) GetUserMoreInfo() {
+	uid, _ := this.GetInt("uid")
+	if uid <= 0 {
+		this.Response(http.StatusBadRequest, messageBadRequest)
+	}
+	cols := []string{"create_time", "total_reading_time", "total_sign", "total_continuous_sign", "history_total_continuous_sign"}
+	m, err := models.NewMember().Find(uid, cols...)
+	if err != nil {
+		this.Response(http.StatusInternalServerError, messageInternalServerError)
+	}
+	rt := models.NewReadingTime()
+	u := UserMoreInfo{
+		MemberId:              uid,
+		SignedAt:              models.NewSign().LatestSignTime(uid),
+		CreatedAt:             int(m.CreateTime.Unix()),
+		TotalSign:             m.TotalSign,
+		TotalContinuousSign:   m.TotalContinuousSign,
+		HistoryContinuousSign: m.HistoryTotalContinuousSign,
+		TodayReading:          rt.GetReadingTime(uid, models.PeriodDay),
+		MonthReading:          rt.GetReadingTime(uid, models.PeriodMonth),
+		TotalReading:          m.TotalReadingTime,
+	}
+	this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"info": u})
 }
 
 // 【OK】
@@ -477,7 +503,7 @@ func (this *CommonController) SearchDoc() {
 		}
 		total = count
 		for _, book := range result {
-			ids = append(ids, book.BookId)
+			ids = append(ids, book.DocumentId)
 		}
 	}
 
@@ -889,6 +915,12 @@ func (this *CommonController) Banners() {
 	if bannerSize <= 0 {
 		bannerSize = 2.619
 	}
+
+	for idx, banner := range banners {
+		banner.Image = this.completeLink(banner.Image)
+		banners[idx] = banner
+	}
+
 	this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"banners": banners, "size": bannerSize})
 }
 
@@ -940,16 +972,15 @@ func (this *CommonController) Bookshelf() {
 		this.Response(http.StatusBadRequest, messageBadRequest)
 	}
 
+	cid, _ := this.GetInt("cid")
+	withCate, _ := this.GetInt("with-cate", 0)
 	size, _ := this.GetInt("size", 10)
-
 	size = utils.RangeNumber(size, 10, maxPageSize)
-
 	page, _ := this.GetInt("page", 1)
 	if page <= 0 {
 		page = 1
 	}
-
-	total, res, err := new(models.Star).List(uid, page, size)
+	total, res, err := new(models.Star).List(uid, page, size, cid)
 	if err != nil {
 		beego.Error(err.Error())
 		this.Response(http.StatusInternalServerError, messageInternalServerError)
@@ -972,6 +1003,10 @@ func (this *CommonController) Bookshelf() {
 	if len(booksId) > 0 {
 		//data["readed"] = new(models.ReadRecord).BooksProgress(uid, booksId...)
 		data["books"] = books
+	}
+
+	if withCate > 0 {
+		data["categories"] = models.NewCategory().CategoryOfUserCollection(uid, true)
 	}
 
 	this.Response(http.StatusOK, messageSuccess, data)
@@ -1031,6 +1066,93 @@ func (this *CommonController) RelatedBook() {
 	data := map[string]interface{}{"books": []string{}}
 	if len(books) > 0 {
 		data["books"] = books
+	}
+	this.Response(http.StatusOK, messageSuccess, data)
+}
+
+// 查询最近阅读过的书籍，返回最近50本
+func (this *CommonController) HistoryReadBook() {
+	page, _ := this.GetInt("page", 1)
+	size, _ := this.GetInt("size", 10)
+	if size <= 0 {
+		size = 10
+	}
+	data := map[string]interface{}{"books": []string{}}
+	uid := this.isLogin()
+	if uid > 0 {
+		books := models.NewReadRecord().HistoryReadBook(uid, page, size)
+		for idx, book := range books {
+			book.Cover = this.completeLink(book.Cover)
+			books[idx] = book
+		}
+		data["books"] = books
+	}
+	this.Response(http.StatusOK, messageSuccess, data)
+}
+
+func (this *CommonController) LatestVersion() {
+	version, _ := strconv.Atoi(models.GetOptionValue("APP_VERSION", "0"))
+	page := models.GetOptionValue("APP_PAGE", "")
+	this.Response(http.StatusOK, messageSuccess, map[string]interface{}{"version": version, "url": page})
+}
+
+func (this *CommonController) Rank() {
+	limit, _ := this.GetInt("limit", 50)
+	if limit > 200 {
+		limit = 200
+	}
+
+	data := make(map[string]interface{})
+
+	tab := this.GetString("tab", "all")
+	switch tab {
+	case "reading":
+		rt := models.NewReadingTime()
+		data["today"] = rt.Sort(models.PeriodDay, limit, true)
+		data["week"] = rt.Sort(models.PeriodWeek, limit, true)
+		data["month"] = rt.Sort(models.PeriodMonth, limit, true)
+		data["last_week"] = rt.Sort(models.PeriodLastWeek, limit, true)
+		data["last_month"] = rt.Sort(models.PeriodLastMoth, limit, true)
+		data["all"] = rt.Sort(models.PeriodAll, limit, true)
+	case "sign":
+		sign := models.NewSign()
+		data["continuous_sign"] = sign.Sorted(limit, "total_continuous_sign", true)
+		data["total_sign"] = sign.Sorted(limit, "total_sign", true)
+		data["this_month_sign"] = sign.SortedByPeriod(limit, models.PeriodMonth, true)
+		data["last_month_sign"] = sign.SortedByPeriod(limit, models.PeriodLastMoth, true)
+		data["history_continuous_sign"] = sign.Sorted(limit, "history_total_continuous_sign", true)
+	case "popular":
+		bookCounter := models.NewBookCounter()
+		data["today"] = bookCounter.PageViewSort(models.PeriodDay, limit, true)
+		data["week"] = bookCounter.PageViewSort(models.PeriodWeek, limit, true)
+		data["month"] = bookCounter.PageViewSort(models.PeriodMonth, limit, true)
+		data["last_week"] = bookCounter.PageViewSort(models.PeriodLastWeek, limit, true)
+		data["last_month"] = bookCounter.PageViewSort(models.PeriodLastMoth, limit, true)
+		data["all"] = bookCounter.PageViewSort(models.PeriodAll, limit, true)
+	case "star":
+		bookCounter := models.NewBookCounter()
+		data["today"] = bookCounter.StarSort(models.PeriodDay, limit, true)
+		data["week"] = bookCounter.StarSort(models.PeriodWeek, limit, true)
+		data["month"] = bookCounter.StarSort(models.PeriodMonth, limit, true)
+		data["last_week"] = bookCounter.StarSort(models.PeriodLastWeek, limit, true)
+		data["last_month"] = bookCounter.StarSort(models.PeriodLastMoth, limit, true)
+		data["all"] = bookCounter.StarSort(models.PeriodAll, limit, true)
+	default:
+		tab = "all"
+		sign := models.NewSign()
+		book := models.NewBook()
+		data["continuous_sign"] = sign.Sorted(limit, "total_continuous_sign", true)
+		data["total_sign"] = sign.Sorted(limit, "total_sign", true)
+		data["star_books"] = book.Sorted(limit, "star")
+		data["vcnt_books"] = book.Sorted(limit, "vcnt")
+		data["comment_books"] = book.Sorted(limit, "cnt_comment")
+		// 这里要适配一下APP端，将错就错的写法，转换一下字段
+		readers := models.NewReadingTime().Sort(models.PeriodAll, limit, true)
+		for idx, reader := range readers {
+			reader.TotalReadingTime = reader.SumTime
+			readers[idx] = reader
+		}
+		data["total_reading"] = readers
 	}
 	this.Response(http.StatusOK, messageSuccess, data)
 }
